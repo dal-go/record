@@ -32,3 +32,24 @@ func TestChangesQueuesCommandsAndResets(t *testing.T) {
 		t.Fatal("Reset must clear every command queue")
 	}
 }
+
+func TestDataMapRoundTripHonorsDBTag(t *testing.T) {
+	type user struct {
+		Name string `json:"name" db:"display_name"`
+	}
+	m, err := DataToMap(&user{Name: "Ada"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := m["display_name"]; got != "Ada" {
+		t.Fatalf("DataToMap() = %#v", m)
+	}
+
+	var decoded user
+	if err := MapToData(&decoded, m); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Name != "Ada" {
+		t.Fatalf("MapToData() = %#v", decoded)
+	}
+}
