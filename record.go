@@ -82,10 +82,17 @@ func newRecordWithOnlyKey(key *Key) *record {
 	return &record{key: key}
 }
 
-// NewRecordWithData creates an envelope with a data target.
+// NewRecordWithData creates an envelope carrying data the caller already has.
+//
+// The error is set to ErrNoError because the data was supplied, not retrieved:
+// there is nothing to wait for, so Data() may be read immediately. This is the
+// same reasoning NewRecordWithIncompleteKey already applies. Contrast NewRecord,
+// which creates an empty envelope awaiting a load and deliberately leaves the
+// error unset so Data() panics until a loader has said how the load went.
 func NewRecordWithData(key *Key, data any) Record {
 	record := newRecordWithOnlyKey(key)
 	record.data = data
+	record.err = ErrNoError
 	return record
 }
 
@@ -116,7 +123,9 @@ func NewRecordWithoutKey(data any) Record {
 	default:
 		panic("data must be a pointer, map[string]..., or slice")
 	}
-	return &record{data: data}
+	// ErrNoError for the same reason as NewRecordWithData: the caller supplied
+	// the data, so there is no retrieval to wait for.
+	return &record{data: data, err: ErrNoError}
 }
 
 // AnyRecordWithError returns the first non-not-found record error.
