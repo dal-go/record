@@ -18,6 +18,10 @@ type Key struct {
 // KeyOption configures a Key during construction.
 type KeyOption func(*Key) error
 
+// ErrInvalidStringID indicates that a string ID cannot be represented as one
+// unambiguous non-empty key-path segment by EscapeID.
+var ErrInvalidStringID = errors.New("record: invalid string ID")
+
 var idCharsReplacer = strings.NewReplacer(
 	".", "%2E",
 	"$", "%24",
@@ -30,6 +34,20 @@ var idCharsReplacer = strings.NewReplacer(
 // EscapeID escapes a record ID for use in a key path.
 func EscapeID(id string) string {
 	return idCharsReplacer.Replace(id)
+}
+
+// ValidateStringID verifies that EscapeID can represent id as one stable,
+// unambiguous key-path segment. A literal percent sign is reserved because
+// EscapeID uses percent-encoded substitutions; accepting it would make values
+// such as "a/b" and "a%2Fb" serialize to the same path.
+func ValidateStringID(id string) error {
+	if id == "" {
+		return fmt.Errorf("%w: value is empty", ErrInvalidStringID)
+	}
+	if strings.ContainsRune(id, '%') {
+		return fmt.Errorf("%w: value contains reserved escape marker %%", ErrInvalidStringID)
+	}
+	return nil
 }
 
 // String returns the serialized path of k.
