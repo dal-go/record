@@ -28,8 +28,10 @@ documentation.
 #### Errors
 
 - Variables: [`ErrNoError`](https://pkg.go.dev/github.com/dal-go/record#ErrNoError),
-  [`ErrRecordNotFound`](https://pkg.go.dev/github.com/dal-go/record#ErrRecordNotFound).
-- Function: [`IsNotFound`](https://pkg.go.dev/github.com/dal-go/record#IsNotFound).
+  [`ErrRecordNotFound`](https://pkg.go.dev/github.com/dal-go/record#ErrRecordNotFound),
+  [`ErrRecordExists`](https://pkg.go.dev/github.com/dal-go/record#ErrRecordExists).
+- Functions: [`IsNotFound`](https://pkg.go.dev/github.com/dal-go/record#IsNotFound),
+  [`IsAlreadyExists`](https://pkg.go.dev/github.com/dal-go/record#IsAlreadyExists).
 
 #### Keys and composite IDs
 
