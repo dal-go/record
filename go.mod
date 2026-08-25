@@ -1,3 +1,3 @@
 module github.com/dal-go/record
 
-go 1.24.0
+go 1.27.0
