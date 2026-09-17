@@ -2,7 +2,6 @@ package record
 
 import (
 	"errors"
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -62,19 +61,84 @@ func TestKeyConstructorsKeepIncompleteKeys(t *testing.T) {
 }
 
 // TestNewKeyWithIDPanicsOnInvalidStringID verifies the panicking half of
-// AC:key-constructors-keep-incomplete-keys.
+// AC:key-constructors-keep-incomplete-keys, and that the panic value is an
+// error a recovering caller can inspect with errors.Is (not just a string).
 func TestNewKeyWithIDPanicsOnInvalidStringID(t *testing.T) {
 	defer func() {
 		r := recover()
 		if r == nil {
 			t.Fatal("NewKeyWithID did not panic on a string id containing '%'")
 		}
-		msg := fmt.Sprint(r)
-		if !strings.Contains(msg, ErrInvalidStringID.Error()) {
-			t.Fatalf("panic message = %q, want it to name %v", msg, ErrInvalidStringID)
+		err, ok := r.(error)
+		if !ok {
+			t.Fatalf("panic value = %#v, want an error", r)
+		}
+		if !errors.Is(err, ErrInvalidStringID) {
+			t.Fatalf("panic error = %v, want ErrInvalidStringID", err)
+		}
+		if !strings.Contains(err.Error(), ErrInvalidStringID.Error()) {
+			t.Fatalf("panic message = %q, want it to name %v", err.Error(), ErrInvalidStringID)
 		}
 	}()
 	NewKeyWithID("users", "a%2Fb")
+}
+
+// TestNewKeyWithParentAndIDPanicsOnInvalidStringID verifies that
+// NewKeyWithParentAndID inherits NewKeyWithID's id validation.
+func TestNewKeyWithParentAndIDPanicsOnInvalidStringID(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("NewKeyWithParentAndID did not panic on a string id containing '%'")
+		}
+		if err, ok := r.(error); !ok || !errors.Is(err, ErrInvalidStringID) {
+			t.Fatalf("panic value = %#v, want an error satisfying errors.Is(_, ErrInvalidStringID)", r)
+		}
+	}()
+	NewKeyWithParentAndID(NewKeyWithID("tenants", "t1"), "users", "a%2Fb")
+}
+
+// namedStringID is a named type whose underlying type is string, used to
+// verify that id validation is not bypassed by a `id.(string)` type
+// assertion that only matches the literal `string` type.
+type namedStringID string
+
+// TestNamedStringTypeIDIsValidated verifies that a named string type gets
+// the same '%' validation as a plain string, across every id-accepting API.
+func TestNamedStringTypeIDIsValidated(t *testing.T) {
+	t.Run("NewKeyWithID panics", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("NewKeyWithID did not panic on a named-string-type id containing '%'")
+			}
+			if err, ok := r.(error); !ok || !errors.Is(err, ErrInvalidStringID) {
+				t.Fatalf("panic value = %#v, want an error satisfying errors.Is(_, ErrInvalidStringID)", r)
+			}
+		}()
+		NewKeyWithID("users", namedStringID("a%2Fb"))
+	})
+
+	t.Run("WithKeyID returns an error", func(t *testing.T) {
+		_, err := NewKeyWithOptions("users", WithKeyID(namedStringID("a%b")))
+		if !errors.Is(err, ErrInvalidStringID) {
+			t.Fatalf("NewKeyWithOptions(...) error = %v, want ErrInvalidStringID", err)
+		}
+	})
+
+	t.Run("Validate rejects it", func(t *testing.T) {
+		k := &Key{collection: "users", ID: namedStringID("a%b")}
+		if err := k.Validate(); !errors.Is(err, ErrInvalidStringID) {
+			t.Fatalf("Validate() = %v, want ErrInvalidStringID", err)
+		}
+	})
+
+	t.Run("empty named-string id stays a legal incomplete key", func(t *testing.T) {
+		k := NewKeyWithID("users", namedStringID(""))
+		if err := k.Validate(); err != nil {
+			t.Fatalf("Validate() = %v, want nil", err)
+		}
+	})
 }
 
 // TestNewKeyWithOptionsReturnsErrInvalidStringID verifies the non-panicking
@@ -95,6 +159,27 @@ func TestKeyStringNeverPanicsOnInvalidID(t *testing.T) {
 	got := k.String()
 	if got == "" {
 		t.Fatal("Key.String() returned empty string unexpectedly")
+	}
+}
+
+// TestNilKeyStringDoesNotPanic verifies that a nil *Key's String() method
+// (a receiver value a caller can produce, e.g. from a zero-value field or a
+// failed lookup) returns without panicking.
+func TestNilKeyStringDoesNotPanic(t *testing.T) {
+	var k *Key
+	if got, want := k.String(), ""; got != want {
+		t.Fatalf("(*Key)(nil).String() = %q, want %q", got, want)
+	}
+}
+
+// TestTypedNilIDPrintsAsEmptySegment verifies that an id holding a typed nil
+// (a non-nil `any` whose dynamic value is nil, e.g. a nil pointer) formats
+// the same as a nil or empty id, rather than printing "<nil>".
+func TestTypedNilIDPrintsAsEmptySegment(t *testing.T) {
+	var nilPtr *int
+	k := &Key{collection: "users", ID: nilPtr}
+	if got, want := k.String(), "users/"; got != want {
+		t.Fatalf("Key.String() = %q, want %q", got, want)
 	}
 }
 

@@ -52,10 +52,11 @@ var ErrMalformedIDSegment = errors.New("record: malformed id segment")
 // imports record, not the reverse — so it cannot itself wrap dal.ErrNotSupported.
 // Instead, a caller that needs that combination (dbschema.ParseSchemaPath)
 // detects this sentinel with errors.Is and wraps both of its own sentinels
-// around it, for example:
+// around it, keeping this error as the cause so its segment-specific message
+// is not lost, for example:
 //
 //	if errors.Is(err, record.ErrReservedKeySegment) {
-//	    return fmt.Errorf("%w: %w", dbschema.ErrReservedKeySegment, dal.ErrNotSupported)
+//	    return fmt.Errorf("%w: %w: %w", dbschema.ErrReservedKeySegment, dal.ErrNotSupported, err)
 //	}
 //
 // The resulting error satisfies both target checks through Go's multiple-%w
@@ -154,11 +155,17 @@ const (
 //  3. any other segment beginning with "{": malformed. Returns an error
 //     satisfying errors.Is(err, ErrMalformedIDSegment).
 //  4. otherwise: a concrete id, unescaped with UnescapeID. A segment
-//     containing a raw '{' '}' ',' '=', or an unrecognised '%' escape, is
-//     malformed: the returned error satisfies both
-//     errors.Is(err, ErrMalformedIDSegment) and
+//     containing a raw character EscapeID would have escaped, or an
+//     unrecognised '%' escape, is malformed: the returned error satisfies
+//     both errors.Is(err, ErrMalformedIDSegment) and
 //     errors.Is(err, ErrInvalidStringID).
+//
+// An empty segment is always malformed; SplitPath never produces one, but
+// ClassifyIDSegment does not rely on that to reject it.
 func ClassifyIDSegment(segment string) (kind IDSegmentKind, id string, err error) {
+	if segment == "" {
+		return 0, "", fmt.Errorf("%w: empty segment", ErrMalformedIDSegment)
+	}
 	if strings.HasPrefix(segment, "{") {
 		if strings.HasSuffix(segment, "}") {
 			inner := segment[1 : len(segment)-1]
@@ -178,44 +185,61 @@ func ClassifyIDSegment(segment string) (kind IDSegmentKind, id string, err error
 	return ConcreteIDSegment, unescaped, nil
 }
 
-// idCharsUnescaper reverses idCharsReplacer (see key.go): each two-hex-digit
-// escape code EscapeID can produce, mapped back to the raw byte it replaced.
-var idCharsUnescaper = map[string]byte{
-	"2E": '.',
-	"24": '$',
-	"23": '#',
-	"5B": '[',
-	"5D": ']',
-	"2F": '/',
-	"7B": '{',
-	"7D": '}',
-	"2C": ',',
-	"3D": '=',
+// idCharsUnescaper reverses idCharsReplacer (see key.go's idEscapeTable):
+// each two-hex-digit escape code EscapeID can produce, mapped back to the
+// raw byte it replaced.
+var idCharsUnescaper = newIDCharsUnescaper()
+
+func newIDCharsUnescaper() map[string]byte {
+	m := make(map[string]byte, len(idEscapeTable))
+	for _, e := range idEscapeTable {
+		m[e.code] = e.raw
+	}
+	return m
+}
+
+// idRawEscapableChars holds every raw byte idEscapeTable maps from, i.e.
+// every character a valid EscapeID output never contains un-escaped.
+// UnescapeID uses it to reject any of them found raw.
+var idRawEscapableChars = newIDRawEscapableChars()
+
+func newIDRawEscapableChars() string {
+	b := make([]byte, len(idEscapeTable))
+	for i, e := range idEscapeTable {
+		b[i] = e.raw
+	}
+	return string(b)
 }
 
 // UnescapeID is the exact inverse of EscapeID: for any raw id that passes
-// ValidateStringID, UnescapeID(EscapeID(id)) == id, nil. It rejects a
-// segment EscapeID could never have produced: a raw, un-escaped '{' '}' ','
-// or '=' character (these must always appear escaped in valid EscapeID
-// output), or a '%' not immediately followed by one of EscapeID's two-hex
-// codes. Both failures return an error satisfying
-// errors.Is(err, ErrInvalidStringID), the same sentinel ValidateStringID
-// uses for the pre-escape direction of the same invariant.
+// ValidateStringID, UnescapeID(EscapeID(id)) == (id, nil); and for any
+// string s UnescapeID accepts (returns a nil error for), EscapeID(unescaped)
+// == s. It rejects any input EscapeID could never have produced:
+//
+//   - a raw, un-escaped occurrence of a character EscapeID replaces (see
+//     idEscapeTable in key.go — currently . $ # [ ] / \ { } , =), because
+//     valid EscapeID output never contains one un-escaped;
+//   - a '%' not immediately followed by exactly one of EscapeID's two-hex
+//     codes in upper case. A lower-case code (e.g. "%2e") is rejected too,
+//     so EscapeID's output is the one and only valid escaped spelling of a
+//     given raw id.
+//
+// Both failures return an error satisfying errors.Is(err, ErrInvalidStringID),
+// the same sentinel ValidateStringID uses for the pre-escape direction of
+// the same invariant.
 func UnescapeID(id string) (string, error) {
-	if !strings.ContainsAny(id, "%{},=") {
+	if !strings.ContainsAny(id, idRawEscapableChars+"%") {
 		return id, nil
 	}
 	var b strings.Builder
 	b.Grow(len(id))
 	for i := 0; i < len(id); {
-		switch id[i] {
-		case '{', '}', ',', '=':
-			return "", fmt.Errorf("%w: raw %q in escaped id %q", ErrInvalidStringID, string(id[i]), id)
-		case '%':
+		c := id[i]
+		if c == '%' {
 			if i+3 > len(id) {
 				return "", fmt.Errorf("%w: truncated escape in %q", ErrInvalidStringID, id)
 			}
-			code := strings.ToUpper(id[i+1 : i+3])
+			code := id[i+1 : i+3]
 			ch, ok := idCharsUnescaper[code]
 			if !ok {
 				return "", fmt.Errorf("%w: unknown escape %%%s in %q", ErrInvalidStringID, code, id)
@@ -223,9 +247,11 @@ func UnescapeID(id string) (string, error) {
 			b.WriteByte(ch)
 			i += 3
 			continue
-		default:
-			b.WriteByte(id[i])
 		}
+		if strings.IndexByte(idRawEscapableChars, c) >= 0 {
+			return "", fmt.Errorf("%w: raw %q in escaped id %q", ErrInvalidStringID, string(c), id)
+		}
+		b.WriteByte(c)
 		i++
 	}
 	return b.String(), nil

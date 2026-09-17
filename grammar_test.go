@@ -27,23 +27,30 @@ func TestEscapeIDEscapesReservedGrammarChars(t *testing.T) {
 	}
 }
 
+// idRoundTripFixtures covers every character EscapeID escapes, individually
+// and combined, plus a Windows-hostile backslash id (the concern that
+// motivated escaping '\' as %5C: an unescaped '\' in an id would otherwise
+// become a directory separator on Windows, splitting one id into two path
+// levels).
+var idRoundTripFixtures = []string{
+	"plain",
+	"a.b",
+	"a$b",
+	"a#b",
+	"a[b]",
+	"a/b",
+	`a\b`,
+	"a{b}",
+	"a,b",
+	"a=b",
+	"{a=b,c}",
+	"base64==",
+	`.$#[]/\{},=`,
+	"",
+}
+
 func TestEscapeIDUnescapeIDRoundTrip(t *testing.T) {
-	ids := []string{
-		"plain",
-		"a.b",
-		"a$b",
-		"a#b",
-		"a[b]",
-		"a/b",
-		"a{b}",
-		"a,b",
-		"a=b",
-		"{a=b,c}",
-		"base64==",
-		".$#[]/{},=",
-		"",
-	}
-	for _, id := range ids {
+	for _, id := range idRoundTripFixtures {
 		escaped := EscapeID(id)
 		got, err := UnescapeID(escaped)
 		if err != nil {
@@ -55,16 +62,57 @@ func TestEscapeIDUnescapeIDRoundTrip(t *testing.T) {
 	}
 }
 
+func TestEscapeIDEscapesBackslash(t *testing.T) {
+	if got, want := EscapeID(`a\b`), `a%5Cb`; got != want {
+		t.Fatalf("EscapeID(%q) = %q, want %q", `a\b`, got, want)
+	}
+	if got, want := NewKeyWithID("users", `a\b`).String(), `users/a%5Cb`; got != want {
+		t.Fatalf("Key.String() = %q, want %q", got, want)
+	}
+}
+
+// TestUnescapeIDIsExactInverse is a property test over idRoundTripFixtures:
+// for every raw id x, UnescapeID(EscapeID(x)) == x (the forward direction),
+// and for every escaped string s UnescapeID accepts, EscapeID(unescaped) ==
+// s (the reverse direction) — i.e. EscapeID and UnescapeID are exact,
+// bijective inverses of one another, not just forward round-trippable.
+func TestUnescapeIDIsExactInverse(t *testing.T) {
+	for _, x := range idRoundTripFixtures {
+		s := EscapeID(x)
+		unescaped, err := UnescapeID(s)
+		if err != nil {
+			t.Fatalf("UnescapeID(EscapeID(%q)=%q) error = %v", x, s, err)
+		}
+		if unescaped != x {
+			t.Fatalf("UnescapeID(EscapeID(%q)) = %q, want %q", x, unescaped, x)
+		}
+		if reEscaped := EscapeID(unescaped); reEscaped != s {
+			t.Fatalf("EscapeID(UnescapeID(%q)) = %q, want %q", s, reEscaped, s)
+		}
+	}
+}
+
 func TestUnescapeIDRejectsMalformedInput(t *testing.T) {
 	for _, id := range []string{
+		// raw characters a valid EscapeID output never contains unescaped.
+		"a.b",
+		"a$b",
+		"a#b",
+		"a[b",
+		"a]b",
+		"a/b",
+		`a\b`,
 		"a{b",
 		"a}b",
 		"a,b",
 		"a=b",
+		// malformed or non-canonical '%' escapes.
 		"a%",
 		"a%2",
 		"a%tug",
 		"a%ZZ",
+		"a%2e", // lower-case code: EscapeID never produces this spelling.
+		"a%5c",
 	} {
 		if _, err := UnescapeID(id); !errors.Is(err, ErrInvalidStringID) {
 			t.Fatalf("UnescapeID(%q) error = %v, want ErrInvalidStringID", id, err)
@@ -201,7 +249,7 @@ func TestClassifyIDSegmentReservedCompositeKey(t *testing.T) {
 }
 
 func TestClassifyIDSegmentMalformed(t *testing.T) {
-	for _, segment := range []string{"{}", "{ext-id}", "{extID", "data,tug", "data%tug", "data%2"} {
+	for _, segment := range []string{"", "{}", "{ext-id}", "{extID", "data,tug", "data%tug", "data%2"} {
 		_, _, err := ClassifyIDSegment(segment)
 		if !errors.Is(err, ErrMalformedIDSegment) {
 			t.Fatalf("ClassifyIDSegment(%q) error = %v, want ErrMalformedIDSegment", segment, err)
@@ -264,26 +312,43 @@ func TestMalformedAndRecordPathsRejected(t *testing.T) {
 		}
 	}
 
-	malformed := []string{
-		"",
-		"/",
-		"ext/datatug/",
-		"ext//projects",
-		"ext/{}/projects",
-		"ext/{ext-id}/projects",
-		"ext/{extID/projects",
-		"ext/{id}/projects/{id}/queries",
-		"ext/datatug/proj{ects",
-		"ext/data,tug/projects",
-		"ext/data%tug/projects",
+	// Each malformed path is checked against the specific record-level
+	// sentinel the underlying primitive is expected to raise, not just "any
+	// error", so a primitive that starts returning the wrong kind of failure
+	// (e.g. treating a bad id as a path-splitting error) would be caught.
+	malformed := []struct {
+		path string
+		want error
+	}{
+		{"", ErrInvalidPath},
+		{"/", ErrInvalidPath},
+		{"ext/datatug/", ErrInvalidPath},
+		{"ext//projects", ErrInvalidPath},
+		{"ext/{}/projects", ErrMalformedIDSegment},
+		{"ext/{ext-id}/projects", ErrMalformedIDSegment},
+		{"ext/{extID/projects", ErrMalformedIDSegment},
+		{"ext/{id}/projects/{id}/queries", errDuplicatePlaceholderForTest},
+		{"ext/datatug/proj{ects", ErrInvalidCollectionName},
+		{"ext/data,tug/projects", ErrMalformedIDSegment},
+		{"ext/data%tug/projects", ErrMalformedIDSegment},
 	}
-	for _, path := range malformed {
-		err := classifyPathForTest(path)
-		if err == nil {
-			t.Fatalf("classifyPathForTest(%q) = nil, want an error", path)
+	for _, c := range malformed {
+		err := classifyPathForTest(c.path)
+		if !errors.Is(err, c.want) {
+			t.Fatalf("classifyPathForTest(%q) error = %v, want errors.Is(_, %v)", c.path, err, c.want)
 		}
 		if errors.Is(err, errRecordPathNotCollectionForTest) {
-			t.Fatalf("classifyPathForTest(%q) = record-path-not-collection, want a malformed-path error", path)
+			t.Fatalf("classifyPathForTest(%q) = record-path-not-collection, want a malformed-path error", c.path)
+		}
+	}
+
+	// "ext/data,tug/projects" and "ext/data%tug/projects" additionally
+	// surface the underlying UnescapeID failure through ClassifyIDSegment's
+	// wrapping, so a caller can tell "malformed id shape" from "malformed id
+	// escaping" if it needs to.
+	for _, path := range []string{"ext/data,tug/projects", "ext/data%tug/projects"} {
+		if err := classifyPathForTest(path); !errors.Is(err, ErrInvalidStringID) {
+			t.Fatalf("classifyPathForTest(%q) error = %v, want errors.Is(_, ErrInvalidStringID)", path, err)
 		}
 	}
 }
