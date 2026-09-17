@@ -43,53 +43,21 @@ documentation.
   [`NewIncompleteKey`](https://pkg.go.dev/github.com/dal-go/record#NewIncompleteKey),
   [`NewKeyWithFields`](https://pkg.go.dev/github.com/dal-go/record#NewKeyWithFields), and
   [`NewKeyWithOptions`](https://pkg.go.dev/github.com/dal-go/record#NewKeyWithOptions).
-  A non-empty string id containing the reserved `%` panics (the two direct
-  constructors) or is returned as an error satisfying
-  `errors.Is(err, ErrInvalidStringID)` (`WithKeyID`, via `NewKeyWithOptions`);
-  an empty string id stays legal and denotes an incomplete key.
 - Key options: [`WithKeyID`](https://pkg.go.dev/github.com/dal-go/record#WithKeyID),
   [`WithStringID`](https://pkg.go.dev/github.com/dal-go/record#WithStringID),
   [`WithIntID`](https://pkg.go.dev/github.com/dal-go/record#WithIntID),
   [`WithFields`](https://pkg.go.dev/github.com/dal-go/record#WithFields), and
   [`WithParentKey`](https://pkg.go.dev/github.com/dal-go/record#WithParentKey).
-- Key helpers: [`EscapeID`](https://pkg.go.dev/github.com/dal-go/record#EscapeID),
-  [`UnescapeID`](https://pkg.go.dev/github.com/dal-go/record#UnescapeID) (its
-  exact inverse), and [`EqualKeys`](https://pkg.go.dev/github.com/dal-go/record#EqualKeys).
-- Methods: [`Key.String`](https://pkg.go.dev/github.com/dal-go/record#Key.String)
-  (never panics; an incomplete id prints as an empty segment, e.g. `users/`),
+- Key helpers: [`EscapeID`](https://pkg.go.dev/github.com/dal-go/record#EscapeID)
+  and [`EqualKeys`](https://pkg.go.dev/github.com/dal-go/record#EqualKeys).
+- Methods: [`Key.String`](https://pkg.go.dev/github.com/dal-go/record#Key.String),
   [`Key.CollectionPath`](https://pkg.go.dev/github.com/dal-go/record#Key.CollectionPath),
   [`Key.Level`](https://pkg.go.dev/github.com/dal-go/record#Key.Level),
   [`Key.Parent`](https://pkg.go.dev/github.com/dal-go/record#Key.Parent),
   [`Key.Collection`](https://pkg.go.dev/github.com/dal-go/record#Key.Collection),
-  [`Key.Validate`](https://pkg.go.dev/github.com/dal-go/record#Key.Validate)
-  (structure and characters, not completeness; `nil` for an otherwise-valid
-  incomplete key),
+  [`Key.Validate`](https://pkg.go.dev/github.com/dal-go/record#Key.Validate),
   [`Key.Equal`](https://pkg.go.dev/github.com/dal-go/record#Key.Equal), and
   [`FieldVal.Validate`](https://pkg.go.dev/github.com/dal-go/record#FieldVal.Validate).
-
-#### Path grammar
-
-The DALgo path grammar (`collection/id/collection/id/…`, shared by
-`Key.String()`, `dal.CollectionRef.Path()` and `dbschema.SchemaPath` in
-`github.com/dal-go/dalgo`) is defined once here, next to `EscapeID`.
-
-- Errors: [`ErrInvalidPath`](https://pkg.go.dev/github.com/dal-go/record#ErrInvalidPath),
-  [`ErrInvalidCollectionName`](https://pkg.go.dev/github.com/dal-go/record#ErrInvalidCollectionName),
-  [`ErrMalformedIDSegment`](https://pkg.go.dev/github.com/dal-go/record#ErrMalformedIDSegment), and
-  [`ErrReservedKeySegment`](https://pkg.go.dev/github.com/dal-go/record#ErrReservedKeySegment)
-  (the reserved `{field=value,...}` composite-key grammar; see its doc comment
-  for how a caller that cannot import `dalgo`'s `dal.ErrNotSupported`, such as
-  this package, still lets `dbschema` satisfy both sentinels).
-- Segment splitting: [`SplitPath`](https://pkg.go.dev/github.com/dal-go/record#SplitPath)
-  (a leading `/` is optional and never emitted) and
-  [`PathAddressesCollection`](https://pkg.go.dev/github.com/dal-go/record#PathAddressesCollection)
-  (odd segment count = collection, even = record).
-- Names: [`ValidateCollectionName`](https://pkg.go.dev/github.com/dal-go/record#ValidateCollectionName)
-  and [`ValidPlaceholderName`](https://pkg.go.dev/github.com/dal-go/record#ValidPlaceholderName)
-  (the identifier rule shared with `dalgo/access`'s `Capture` name).
-- Id classification: [`IDSegmentKind`](https://pkg.go.dev/github.com/dal-go/record#IDSegmentKind)
-  (`ConcreteIDSegment`, `PlaceholderIDSegment`) and
-  [`ClassifyIDSegment`](https://pkg.go.dev/github.com/dal-go/record#ClassifyIDSegment).
 
 #### Record envelopes
 

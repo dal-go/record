@@ -22,56 +22,18 @@ type KeyOption func(*Key) error
 // unambiguous non-empty key-path segment by EscapeID.
 var ErrInvalidStringID = errors.New("record: invalid string ID")
 
-// idEscapeEntry pairs one raw byte EscapeID replaces with the two-hex-digit
-// code it becomes. This is the single source of truth for the escape table:
-// idCharsReplacer (EscapeID's forward direction, in this file) and
-// idCharsUnescaper (UnescapeID's reverse direction, in grammar.go) are both
-// built from it, so the table itself is never duplicated.
-type idEscapeEntry struct {
-	raw  byte
-	code string
-}
-
-var idEscapeTable = []idEscapeEntry{
-	{'.', "2E"},
-	{'$', "24"},
-	{'#', "23"},
-	{'[', "5B"},
-	{']', "5D"},
-	{'/', "2F"},
-	{'\\', "5C"},
-	{'{', "7B"},
-	{'}', "7D"},
-	{',', "2C"},
-	{'=', "3D"},
-}
-
-var idCharsReplacer = newIDCharsReplacer()
-
-func newIDCharsReplacer() *strings.Replacer {
-	pairs := make([]string, 0, len(idEscapeTable)*2)
-	for _, e := range idEscapeTable {
-		pairs = append(pairs, string(e.raw), "%"+e.code)
-	}
-	return strings.NewReplacer(pairs...)
-}
+var idCharsReplacer = strings.NewReplacer(
+	".", "%2E",
+	"$", "%24",
+	"#", "%23",
+	"[", "%5B",
+	"]", "%5D",
+	"/", "%2F",
+)
 
 // EscapeID escapes a record ID for use in a key path.
 func EscapeID(id string) string {
 	return idCharsReplacer.Replace(id)
-}
-
-// stringIDValue extracts the underlying string value of id when its
-// reflect.Kind is String — including a named type whose underlying type is
-// string (e.g. "type MyID string"), which a plain `id.(string)` type
-// assertion would miss, silently letting a named-string id bypass the '%'
-// check.
-func stringIDValue(id any) (string, bool) {
-	v := reflect.ValueOf(id)
-	if v.Kind() != reflect.String {
-		return "", false
-	}
-	return v.String(), true
 }
 
 // ValidateStringID verifies that EscapeID can represent id as one stable,
@@ -88,55 +50,22 @@ func ValidateStringID(id string) error {
 	return nil
 }
 
-// String returns the serialized path of k. It never panics, even for a nil
-// *Key: an incomplete key (a nil or empty id, at any level) prints an empty
-// id segment, e.g. "users/", so logging any key — nil, incomplete or
-// invalid — is safe. String does not validate k; use Validate for that.
+// String returns the serialized path of k.
 func (k *Key) String() string {
-	if k == nil {
-		return ""
-	}
 	key := k
-	s := make([]string, 0, key.Level()*2+2)
+	if err := key.Validate(); err != nil {
+		panic(fmt.Sprintf("will not generate path for invalid key: %v", err))
+	}
+	s := make([]string, 0, key.Level()*2)
 	for {
-		s = append(s, formatKeyID(key.ID), key.collection)
+		id := EscapeID(fmt.Sprintf("%v", key.ID))
+		s = append(s, id, key.collection)
 		if key.parent == nil {
 			break
 		}
 		key = key.parent
 	}
 	return reverseStringsJoin(s, "/")
-}
-
-// formatKeyID formats and escapes a key's id for use in Key.String(). A nil
-// id (as NewIncompleteKey leaves it), a typed nil held in the ID interface
-// (e.g. a nil pointer id), or an empty string id all produce an empty
-// segment, matching the incomplete-key contract of Key.String().
-func formatKeyID(id any) string {
-	if id == nil {
-		return ""
-	}
-	if s, ok := id.(string); ok {
-		return EscapeID(s)
-	}
-	if isNilValue(id) {
-		return ""
-	}
-	return EscapeID(fmt.Sprintf("%v", id))
-}
-
-// isNilValue reports whether v holds a typed nil (e.g. a nil pointer, map,
-// slice, chan, func or interface) inside the any it was boxed into. Such a
-// value is != nil when compared directly, because the interface carries a
-// concrete type, but still represents "nothing" for id-formatting purposes.
-func isNilValue(v any) bool {
-	rv := reflect.ValueOf(v)
-	switch rv.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Chan, reflect.Func, reflect.Interface, reflect.UnsafePointer:
-		return rv.IsNil()
-	default:
-		return false
-	}
 }
 
 // CollectionPath returns the collection path of k.
@@ -197,72 +126,40 @@ func (k *Key) Collection() string {
 	return k.collection
 }
 
-// Validate validates k and its ancestors. It checks structure and
-// characters, not completeness: a nil or empty id is a legal incomplete key
-// and Validate returns nil for it, at any level. A non-empty string id is
-// checked against ValidateStringID (the reserved '%' rule) at every level,
-// so a key can be validated before an id is assigned. Completeness — that
-// every id has actually been assigned — is a write-time concern for the
-// driver or id generator, not Validate's.
+// Validate validates k and its ancestors.
 func (k *Key) Validate() error {
-	for key := k; key != nil; key = key.parent {
-		if strings.TrimSpace(key.collection) == "" {
-			return errors.New("key must have `recordsetSource` field value")
-		}
-		if s, ok := stringIDValue(key.ID); ok && s != "" {
-			if err := ValidateStringID(s); err != nil {
-				return fmt.Errorf("key %s has an invalid id: %w", key.collection, err)
+	if strings.TrimSpace(k.collection) == "" {
+		return errors.New("key must have `recordsetSource` field value")
+	}
+	if k.parent != nil {
+		return k.parent.Validate()
+	}
+	if fields, ok := k.ID.([]FieldVal); ok {
+		for i, field := range fields {
+			if err := field.Validate(); err != nil {
+				return fmt.Errorf("key has a invalid referencing to a field value #%v: %w", i, err)
 			}
 		}
-		if fields, ok := key.ID.([]FieldVal); ok {
-			for i, field := range fields {
-				if err := field.Validate(); err != nil {
-					return fmt.Errorf("key has a invalid referencing to a field value #%v: %w", i, err)
-				}
-			}
-		}
-		if id, ok := key.ID.(interface{ Validate() error }); ok {
-			if err := id.Validate(); err != nil {
-				return err
-			}
-		}
+	}
+	if id, ok := k.ID.(interface{ Validate() error }); ok {
+		return id.Validate()
 	}
 	return nil
 }
 
-// NewKeyWithParentAndID creates a key below parent with id. See NewKeyWithID
-// for the id-validation rule this constructor inherits.
+// NewKeyWithParentAndID creates a key below parent with id.
 func NewKeyWithParentAndID[T comparable](parent *Key, collection string, id T) *Key {
 	key := NewKeyWithID(collection, id)
 	key.parent = parent
 	return key
 }
 
-// NewKeyWithID creates a key with id. An empty string id is legal and
-// denotes an incomplete key, the same state NewIncompleteKey produces; a
-// non-empty string id containing the reserved '%' panics, naming
-// ErrInvalidStringID, the same way this constructor already panics for an
-// empty collection name.
+// NewKeyWithID creates a key with id.
 func NewKeyWithID[T comparable](collection string, id T) *Key {
 	if collection == "" {
 		panic("recordsetSource is a required parameter")
 	}
-	panicOnInvalidStringID(collection, id)
 	return &Key{collection: collection, ID: id}
-}
-
-// panicOnInvalidStringID panics if id is a non-empty string — including a
-// named type whose underlying type is string — that fails ValidateStringID
-// (REQ:key-constructors-validate). It is a no-op for a non-string id or an
-// empty string id, which stays a legal incomplete key. It panics with an
-// error value, wrapping ErrInvalidStringID with %w, so a recovering caller
-// can use errors.Is on the recovered value.
-func panicOnInvalidStringID[T comparable](collection string, id T) {
-	if s, ok := stringIDValue(id); ok && s != "" {
-		if err := ValidateStringID(s); err != nil {
-			panic(fmt.Errorf("record: invalid id %q for collection %q: %w", s, collection, err))
-		}
-	}
 }
 
 // NewIncompleteKey creates a key whose ID will be supplied later.
@@ -273,19 +170,9 @@ func NewIncompleteKey(collection string, idKind reflect.Kind, parent *Key) *Key 
 	return &Key{parent: parent, collection: collection, IDKind: idKind}
 }
 
-// WithKeyID sets a key ID during construction. An empty string id is legal
-// and denotes an incomplete key; a non-empty string id — including a named
-// type whose underlying type is string — containing the reserved '%'
-// returns an error satisfying errors.Is(err, ErrInvalidStringID) through
-// NewKeyWithOptions, rather than panicking, because this option can fail
-// independently of the collection name.
+// WithKeyID sets a key ID during construction.
 func WithKeyID[T comparable](id T) KeyOption {
 	return func(key *Key) error {
-		if s, ok := stringIDValue(id); ok && s != "" {
-			if err := ValidateStringID(s); err != nil {
-				return err
-			}
-		}
 		key.ID = id
 		return nil
 	}
