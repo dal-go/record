@@ -29,6 +29,10 @@ var idCharsReplacer = strings.NewReplacer(
 	"[", "%5B",
 	"]", "%5D",
 	"/", "%2F",
+	"{", "%7B",
+	"}", "%7D",
+	",", "%2C",
+	"=", "%3D",
 )
 
 // EscapeID escapes a record ID for use in a key path.
@@ -50,22 +54,34 @@ func ValidateStringID(id string) error {
 	return nil
 }
 
-// String returns the serialized path of k.
+// String returns the serialized path of k. It never panics: an incomplete
+// key (a nil or empty id, at any level) prints an empty id segment, e.g.
+// "users/", so logging any key, incomplete or invalid, is safe. String does
+// not validate k; use Validate for that.
 func (k *Key) String() string {
 	key := k
-	if err := key.Validate(); err != nil {
-		panic(fmt.Sprintf("will not generate path for invalid key: %v", err))
-	}
-	s := make([]string, 0, key.Level()*2)
+	s := make([]string, 0, key.Level()*2+2)
 	for {
-		id := EscapeID(fmt.Sprintf("%v", key.ID))
-		s = append(s, id, key.collection)
+		s = append(s, formatKeyID(key.ID), key.collection)
 		if key.parent == nil {
 			break
 		}
 		key = key.parent
 	}
 	return reverseStringsJoin(s, "/")
+}
+
+// formatKeyID formats and escapes a key's id for use in Key.String(). A nil
+// id (as NewIncompleteKey leaves it) or an empty string id both produce an
+// empty segment, matching the incomplete-key contract of Key.String().
+func formatKeyID(id any) string {
+	if id == nil {
+		return ""
+	}
+	if s, ok := id.(string); ok {
+		return EscapeID(s)
+	}
+	return EscapeID(fmt.Sprintf("%v", id))
 }
 
 // CollectionPath returns the collection path of k.
@@ -126,40 +142,69 @@ func (k *Key) Collection() string {
 	return k.collection
 }
 
-// Validate validates k and its ancestors.
+// Validate validates k and its ancestors. It checks structure and
+// characters, not completeness: a nil or empty id is a legal incomplete key
+// and Validate returns nil for it, at any level. A non-empty string id is
+// checked against ValidateStringID (the reserved '%' rule) at every level,
+// so a key can be validated before an id is assigned. Completeness — that
+// every id has actually been assigned — is a write-time concern for the
+// driver or id generator, not Validate's.
 func (k *Key) Validate() error {
-	if strings.TrimSpace(k.collection) == "" {
-		return errors.New("key must have `recordsetSource` field value")
-	}
-	if k.parent != nil {
-		return k.parent.Validate()
-	}
-	if fields, ok := k.ID.([]FieldVal); ok {
-		for i, field := range fields {
-			if err := field.Validate(); err != nil {
-				return fmt.Errorf("key has a invalid referencing to a field value #%v: %w", i, err)
+	for key := k; key != nil; key = key.parent {
+		if strings.TrimSpace(key.collection) == "" {
+			return errors.New("key must have `recordsetSource` field value")
+		}
+		if s, ok := key.ID.(string); ok && s != "" {
+			if err := ValidateStringID(s); err != nil {
+				return fmt.Errorf("key %s has an invalid id: %w", key.collection, err)
 			}
 		}
-	}
-	if id, ok := k.ID.(interface{ Validate() error }); ok {
-		return id.Validate()
+		if fields, ok := key.ID.([]FieldVal); ok {
+			for i, field := range fields {
+				if err := field.Validate(); err != nil {
+					return fmt.Errorf("key has a invalid referencing to a field value #%v: %w", i, err)
+				}
+			}
+		}
+		if id, ok := key.ID.(interface{ Validate() error }); ok {
+			if err := id.Validate(); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
 
-// NewKeyWithParentAndID creates a key below parent with id.
+// NewKeyWithParentAndID creates a key below parent with id. See NewKeyWithID
+// for the id-validation rule this constructor inherits.
 func NewKeyWithParentAndID[T comparable](parent *Key, collection string, id T) *Key {
 	key := NewKeyWithID(collection, id)
 	key.parent = parent
 	return key
 }
 
-// NewKeyWithID creates a key with id.
+// NewKeyWithID creates a key with id. An empty string id is legal and
+// denotes an incomplete key, the same state NewIncompleteKey produces; a
+// non-empty string id containing the reserved '%' panics, naming
+// ErrInvalidStringID, the same way this constructor already panics for an
+// empty collection name.
 func NewKeyWithID[T comparable](collection string, id T) *Key {
 	if collection == "" {
 		panic("recordsetSource is a required parameter")
 	}
+	panicOnInvalidStringID(collection, id)
 	return &Key{collection: collection, ID: id}
+}
+
+// panicOnInvalidStringID panics if id is a non-empty string that fails
+// ValidateStringID (REQ:key-constructors-validate). It is a no-op for a
+// non-string id or an empty string id, which stays a legal incomplete key.
+func panicOnInvalidStringID[T comparable](collection string, id T) {
+	if s, ok := any(id).(string); ok && s != "" {
+		if err := ValidateStringID(s); err != nil {
+			panic(fmt.Sprintf("record: invalid id %q for collection %q: %v", s, collection, err))
+		}
+	}
 }
 
 // NewIncompleteKey creates a key whose ID will be supplied later.
@@ -170,9 +215,18 @@ func NewIncompleteKey(collection string, idKind reflect.Kind, parent *Key) *Key 
 	return &Key{parent: parent, collection: collection, IDKind: idKind}
 }
 
-// WithKeyID sets a key ID during construction.
+// WithKeyID sets a key ID during construction. An empty string id is legal
+// and denotes an incomplete key; a non-empty string id containing the
+// reserved '%' returns an error satisfying errors.Is(err, ErrInvalidStringID)
+// through NewKeyWithOptions, rather than panicking, because this option can
+// fail independently of the collection name.
 func WithKeyID[T comparable](id T) KeyOption {
 	return func(key *Key) error {
+		if s, ok := any(id).(string); ok && s != "" {
+			if err := ValidateStringID(s); err != nil {
+				return err
+			}
+		}
 		key.ID = id
 		return nil
 	}
