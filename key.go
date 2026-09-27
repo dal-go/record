@@ -96,13 +96,9 @@ func reverseStringsJoin(elems []string, sep string) string {
 	var b strings.Builder
 	b.Grow(n)
 	for i := len(elems) - 1; i >= 0; i-- {
-		if _, err := b.WriteString(elems[i]); err != nil {
-			panic(err)
-		}
+		b.WriteString(elems[i])
 		if i > 0 {
-			if _, err := b.WriteString(sep); err != nil {
-				panic(err)
-			}
+			b.WriteString(sep)
 		}
 	}
 	return b.String()
